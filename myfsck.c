@@ -8,13 +8,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "genhd.h"
+#include "ext2_fs.h"
 
 #if defined(__FreeBSD__)
 #define lseek64 lseek
 #endif
 
-#define sector_size_bytes 512
-#define PARTITION_SIZE_BYTES 16
+#define SECTOR_SIZE_BYTES     512
+#define PARTITION_SIZE_BYTES  16
+#define PARTITION_SIZE        1024
 
 extern int64_t lseek64(int, int64_t, int);
 
@@ -49,7 +51,7 @@ void read_sectors (int64_t start_sector, unsigned int num_sectors, void *into)
     ssize_t bytes_to_read;
 
 
-    sector_offset = start_sector * sector_size_bytes;
+    sector_offset = start_sector * SECTOR_SIZE_BYTES;
 
     if ((lret = lseek64(device, sector_offset, SEEK_SET)) != sector_offset) {
         fprintf(stderr, "Seek to position %"PRId64" failed: "
@@ -57,7 +59,7 @@ void read_sectors (int64_t start_sector, unsigned int num_sectors, void *into)
         exit(-1);
     }
 
-    bytes_to_read = sector_size_bytes * num_sectors;
+    bytes_to_read = SECTOR_SIZE_BYTES * num_sectors;
 
     if ((ret = read(device, into, bytes_to_read)) != bytes_to_read) {
         fprintf(stderr, "Read sector %"PRId64" length %d failed: "
@@ -94,7 +96,7 @@ int GetOnePartition (int the_sector, char* buf, int64_t offset) {
 
 // Assume each sector only has one partition that could be extended
 void GetAllPartitons (char* diskname) {
-  unsigned char buf[sector_size_bytes]; // A buffer with 512 bytes
+  unsigned char buf[SECTOR_SIZE_BYTES]; // A buffer with 512 bytes
   int           the_sector = 0;         // Read the first sector to get the four primary partitions  
   int64_t       offset;
   int           extendIndex = 0;
@@ -152,6 +154,55 @@ void GetAllPartitons (char* diskname) {
   }  
 }
 
+/*
+ * Get the magic number of a partition
+ */
+void Get_Magicnumber(int parIndex) {
+  const int64_t superblock_offset = 1024;
+  unsigned char buf[PARTITION_SIZE];
+
+  // Offset 2 sectors;
+  int start_sector = parArray[parIndex-1].start_sect + superblock_offset/SECTOR_SIZE_BYTES;
+  read_sectors(start_sector, 2, buf);
+
+  struct ext2_super_block* super_block;
+  super_block = malloc(sizeof(struct ext2_super_block));
+  memcpy(super_block, buf, sizeof(struct ext2_super_block));
+
+  printf("Magic number of partiton %d: 0x%02x\n", parIndex, super_block->s_magic);
+
+  free(super_block);
+}
+
+
+void Translate_Inode_To_Sector () {
+
+}
+
+void Locate_Inode_In_Bitmap() {
+
+}
+
+void Locate_Root_Inode() {
+
+}
+
+void Read_Directory() {
+
+}
+
+void Print_File_Inode() {
+
+}
+
+
+void Print_All_partitions() {
+    int i;
+    for(i = 0; i < parArrayCounter; i++) {
+        printf("0x%02X %d %d\n", parArray[i].sys_ind, parArray[i].start_sect,
+        parArray[i].nr_sects);
+    }  
+}
 
 
 
@@ -195,17 +246,21 @@ void main(int argc, char** argv) {
           break;
       }      
     }
-    // int i;
-    // for(i = 0; i < parArrayCounter; i++) {
-    //     printf("0x%02X %d %d\n", parArray[i].sys_ind, parArray[i].start_sect,
-    //     parArray[i].nr_sects);
+
+
+
+    // if (partition_num > parArrayCounter || partition_num <= 0)
+    //   printf("%d\n", -1);
+    // else {
+    //   printf("0x%02X %d %d\n", parArray[partition_num-1].sys_ind, parArray[partition_num-1].start_sect,
+    //   parArray[partition_num-1].nr_sects);      
     // }
-    if (partition_num > parArrayCounter || partition_num <= 0)
-      printf("%d\n", -1);
-    else {
-      printf("0x%02X %d %d\n", parArray[partition_num-1].sys_ind, parArray[partition_num-1].start_sect,
-      parArray[partition_num-1].nr_sects);      
-    }
+
+    Get_Magicnumber(1);
+
+    free(parArray);
+
+
 
 }
 
