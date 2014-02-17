@@ -24,6 +24,8 @@ static struct partition* parArray;
 
 static int    parArrayCounter = 0;
 
+static int extend_base = 0;
+
 
 /* read_sectors: read a specified number of sectors into a buffer.
  *
@@ -65,91 +67,90 @@ void read_sectors (int64_t start_sector, unsigned int num_sectors, void *into)
 }
 
 
-// void parsePartitionSector(char* buf) {
-//   const int64_t MBR_offset = 446;
-//   int64_t sector_offset;
-//   int64_t lret;
-//   const ssize_t bytes_to_read = 16;
-//   ssize_t ret;
-  
-//   sector_offset = MBR_offset;
 
-
-//   if((lret = lseek64(device, sector_offset, SEEK_SET) != sector_offset)) {
-//     fprintf(stderr, "Seek to position %"PRId64" failed: 
-//             returned %"PRId64"\n", sector_offset, lret);    
-//     exit(-1);
-//   }
-  
-//   struct partition* par = malloc(sizeof(char) * 16);
-//   if((ret = read(device, par, bytes_to_read)) != bytes_to_read) {
-//     fprintf(stderr， "Read  length %d failed:
-//             returned %"PRId64"\n", bytes_to_read, ret);
-//     exit(-1);
-//   }
-// }
-
-int GetOnePartition (int the_sector, char* buf, int64_t offset, struct partition* parArray, int parArrayCounter) {
+int GetOnePartition (int the_sector, char* buf, int64_t offset) {
 //
   memcpy(parArray+parArrayCounter, buf+offset, PARTITION_SIZE_BYTES);
-  
-  parArray[parArrayCounter].start_sect = parArray[parArrayCounter].start_sect + the_sector; 
-  printf("0x%02X %d %d\n", parArray[parArrayCounter].sys_ind, parArray[parArrayCounter].start_sect,
-        parArray[parArrayCounter].nr_sects);
 
-  parArrayCounter++;
-  return parArrayCounter;
+
+  if (parArray[parArrayCounter].sys_ind == DOS_EXTENDED_PARTITION) {
+    // If this partition is an extended one but still the primary partition, 
+    // the counter keeps on increment    
+    if(parArrayCounter <= 3) {
+      extend_base = parArray[parArrayCounter].start_sect;
+      parArrayCounter++;  
+    } else {
+      parArray[parArrayCounter].start_sect = parArray[parArrayCounter].start_sect + extend_base;
+    }
+    return 1;
+  } else {
+    parArray[parArrayCounter].start_sect = parArray[parArrayCounter].start_sect + the_sector;
+    if(parArray[parArrayCounter].sys_ind != 0x00 || parArrayCounter <= 3 )
+      parArrayCounter++;
+    return 0;
+  }
 }
 
 
+// Assume each sector only has one partition that could be extended
 void GetAllPartitons (char* diskname) {
   unsigned char buf[sector_size_bytes]; // A buffer with 512 bytes
-  int           the_sector = 0;         // Read the first sector to get the four primary partitions
-
+  int           the_sector = 0;         // Read the first sector to get the four primary partitions  
   int64_t       offset;
+  int           extendIndex = 0;
   parArray = (struct partition*)malloc(100 * PARTITION_SIZE_BYTES);
   if ((device = open(diskname, O_RDWR)) == -1) {
     perror("Could not open device file");
     exit(-1);
   }
 
-  printf("Dumping sector %d:\n", the_sector);
+  // printf("Dumping sector %d:\n", the_sector);
   read_sectors(the_sector, 1, buf);
 
 
   /*
    * Get the four primary partitions
-   */
-  //Get the first partition
+   */  
   offset = 446;
-  parArrayCounter = GetOnePartition(the_sector, buf, offset, parArray, parArrayCounter);
- 
-  //Get the second partition
-  offset += PARTITION_SIZE_BYTES;
-  parArrayCounter = GetOnePartition(the_sector, buf, offset, parArray, parArrayCounter);
+  int primary_co = 4;
+  while (primary_co != 0) {
+    int stat = GetOnePartition(the_sector, buf, offset);
+    // printf("!!!!!!!!!%d\n",stat);
+    if(stat) {
+      // printf("extended partition\n");
+      extendIndex = parArrayCounter - 1;
+    }
+    offset += PARTITION_SIZE_BYTES;
+    primary_co --;
+  }
 
-  //Get the third partition
-  offset += PARTITION_SIZE_BYTES;
-  parArrayCounter = GetOnePartition(the_sector, buf, offset, parArray, parArrayCounter);
+  /*
+   * Get the extended partitions if existed
+   */ 
+  while(extendIndex != 0) {
+    int logical_co = 2;
+    // get the sector to go from extendIndex
+    the_sector = parArray[extendIndex].start_sect;
 
-  //Get the fourth partition
-  offset += PARTITION_SIZE_BYTES;
-  parArrayCounter = GetOnePartition(the_sector, buf, offset, parArray, parArrayCounter);
+    // reset extendIndex to 0
+    extendIndex = 0;
 
+    // read the target sector
+    read_sectors(the_sector, 1, buf);
 
-
-
-
-
-
-
-  
-  
+    // start from 446 offset
+    offset = 446;
+    while(logical_co != 0) {
+      int stat = GetOnePartition(the_sector, buf, offset);
+      if(stat) {
+        // printf("extended partition\n");
+        extendIndex = parArrayCounter;
+      }
+      offset += PARTITION_SIZE_BYTES;
+      logical_co --;
+    }
+  }  
 }
-
-
-
-
 
 
 
@@ -159,6 +160,7 @@ void usage(const char* progname) {
   printf("Program Options:\n");
   printf("  -p --print <partition number> -i /path/to/disk/image\n");
   printf("  -f --fix   <partition number> -i /path/to/disk/image\n");
+  exit(-1);
 }
 
 
@@ -171,29 +173,40 @@ void main(int argc, char** argv) {
       {0, 0, 0, 0}
     };
 
-
+    int partition_num = 0;
     while((opt = getopt_long(argc, argv, "i:f:p:", long_options, NULL)) != EOF) {
       switch (opt) {
-        case 0:
-          printf("!!!");
-          break;
         case 'p':
-          // print the partition table
-          printf("Print partition: %d\n", atoi(optarg));
+          // print the partition table          
+          partition_num = atoi(optarg);
+          // printf("Print partition: %d\n", partition_num);
           break;
         case 'f':
           // fix the problems
-          printf("fix partition: %d\n", atoi(optarg));
+          partition_num = atoi(optarg);
+          // printf("fix partition: %d\n", partition_num);
           break;
         case 'i':
-          printf("disk image: '%s'\n", optarg);
+          // printf("disk image: '%s'\n", optarg);
           GetAllPartitons(optarg);
           break;
         default:
-          usage(argv[0]);
+          usage(argv[0]);          
           break;
-      }
+      }      
     }
+    // int i;
+    // for(i = 0; i < parArrayCounter; i++) {
+    //     printf("0x%02X %d %d\n", parArray[i].sys_ind, parArray[i].start_sect,
+    //     parArray[i].nr_sects);
+    // }
+    if (partition_num > parArrayCounter || partition_num <= 0)
+      printf("%d\n", -1);
+    else {
+      printf("0x%02X %d %d\n", parArray[partition_num-1].sys_ind, parArray[partition_num-1].start_sect,
+      parArray[partition_num-1].nr_sects);      
+    }
+
 }
 
 
