@@ -31,6 +31,8 @@ void pass2(int parIndex);
 
 void pass3(int parIndex);
 
+void pass4(int parIndex);
+
 extern int64_t lseek64(int, int64_t, int);
 
 static int device;
@@ -248,6 +250,12 @@ int Get_Inode_Counts(int parIndex) {
 
   return super_block.s_inodes_count;
 }
+
+int Get_Block_Counts(int parIndex) {
+  struct ext2_super_block super_block = get_superblock(parIndex);
+
+  return super_block.s_blocks_count;  
+}
 /*
  * Get the magic number of a partition
  */
@@ -428,6 +436,180 @@ void read_inode_recursive(__u32 i_block[], int parIndex, int* mark) {
   }
 
 }
+// int Traverse_i_block_indirect(int blockIndex, int parIndex, int* mark, int block_count) {
+int Traverse_i_block_indirect(int blockIndex, int parIndex, int* mark) {
+  // block_count--;
+  mark[blockIndex] = 1;
+  unsigned char buf_dir[BLOCKSIZE];
+  read_sectors(parArray[parIndex-1].start_sect + blockIndex * BLOCK_SECTOR_RATIO, BLOCK_SECTOR_RATIO, buf_dir);
+  int* ptr = (int*) buf_dir;
+  int i = 0;
+  int total = BLOCKSIZE / sizeof(int);
+  while(i != total) {
+    if(ptr[i] != 0) {
+      mark[ptr[i]] = 1;      
+    }
+    else
+      return 1;    
+    i++;
+  }
+
+  return 0;
+}
+// int Traverse_i_block_doubly_indirect(int blockIndex, int parIndex, int* mark, int block_count) {
+int Traverse_i_block_doubly_indirect(int blockIndex, int parIndex, int* mark) {  
+  mark[blockIndex] = 1;
+  unsigned char buf_dir[BLOCKSIZE];
+  read_sectors(parArray[parIndex-1].start_sect + blockIndex * BLOCK_SECTOR_RATIO, BLOCK_SECTOR_RATIO, buf_dir);
+  int* ptr = (int*) buf_dir;
+  int i = 0;
+  int total = BLOCKSIZE / sizeof(int);
+  while(i != total) {
+    if(ptr[i] != 0) {
+      if(Traverse_i_block_indirect(ptr[i], parIndex, mark))
+        return 1;
+    }
+    else {
+      return 1;
+    }    
+    i++;
+  }
+  return 0;  
+
+}
+
+int Traverse_i_block_triply_indirect(int blockIndex, int parIndex, int* mark) {
+// int Traverse_i_block_triply_indirect(int blockIndex, int parIndex, int* mark, int block_count) {
+  
+  mark[blockIndex] = 1;
+  unsigned char buf_dir[BLOCKSIZE];
+  read_sectors(parArray[parIndex-1].start_sect + blockIndex * BLOCK_SECTOR_RATIO, BLOCK_SECTOR_RATIO, buf_dir);
+  int* ptr = (int*) buf_dir;
+  int i = 0;
+  int total = BLOCKSIZE / sizeof(int);
+  while(i != total) {
+    if(ptr[i] != 0) {
+      if(Traverse_i_block_doubly_indirect(ptr[i], parIndex, mark))
+        return 1;
+    }
+    else {
+      return 1;
+    }    
+    i++;
+  }
+  return 0; 
+
+}
+
+// void Traverse_i_block(__u32 i_block[], int parIndex, int* mark, int block_count) {
+void Traverse_i_block(__u32 i_block[], int parIndex, int* mark) {
+
+  int i = 0;
+  for(; i < EXT2_N_BLOCKS-3 ; i++) {
+    if(i_block[i] != 0) {
+      mark[i_block[i]] = 1;      
+    }
+    else
+      return;
+  }
+
+
+
+  // The 12th Block
+  if(i_block[12] != 0) {  
+    // printf("first:%d\n",i_block[12]);      
+    if(Traverse_i_block_indirect(i_block[12], parIndex, mark))
+      return;    
+  } else
+    return;
+
+  // The 13th Block
+  if(i_block[13] != 0) { 
+    // printf("second:%d\n",i_block[13]);        
+    if(Traverse_i_block_doubly_indirect(i_block[13], parIndex, mark))
+      return;
+  } else
+    return;
+
+  // The 14th Block
+  if(i_block[14] != 0) {    
+    // printf("third:%d\n",i_block[14]);      
+    if(Traverse_i_block_triply_indirect(i_block[14], parIndex, mark))
+      return;    
+  } else
+    return;        
+
+}
+
+void read_block_recursive(__u32 i_block[], int parIndex, int* mark, int* visited) {
+  
+  struct        ext2_dir_entry_2* dir;
+  unsigned char buf_dir[BLOCKSIZE];
+  
+  int i = 0;
+  for(; i < EXT2_N_BLOCKS-3; i++) {
+    if(i_block[i] != 0) {
+
+      // Mark this block as allocated
+      mark[i_block[i]] = 1;
+
+      read_sectors(parArray[parIndex-1].start_sect + i_block[i]* BLOCK_SECTOR_RATIO, BLOCK_SECTOR_RATIO, buf_dir);
+      int len = 0;
+      
+      if(i == 0) {
+        // The first entry should be '.'
+        dir = (struct ext2_dir_entry_2*) (buf_dir+len);
+        
+        len += dir->rec_len;
+
+        // The second entry should be '..'
+        dir = (struct ext2_dir_entry_2*) (buf_dir+len);
+        
+        len += dir->rec_len; 
+      }     
+
+      while(len < BLOCKSIZE) {        
+        dir = (struct ext2_dir_entry_2*) (buf_dir+len);
+        if(dir->file_type == 2) {
+          if(visited[dir->inode] != 1) {                    
+            // Set this directory visited
+            visited[dir->inode] = 1;        
+            // Recursion
+            struct ext2_inode nextInode = Get_Inode(dir->inode, parIndex);      
+            read_block_recursive(nextInode.i_block, parIndex, mark, visited);
+          } 
+        } else {
+          if(dir->file_type != 7) {
+            // Traverse the i_block of this non-directory file  
+            struct ext2_inode nextInode = Get_Inode(dir->inode, parIndex);   
+            // int block_count = (nextInode.i_size + BLOCKSIZE - 1) / BLOCKSIZE;
+            // Traverse_i_block(nextInode.i_block, parIndex, mark, block_count);
+            Traverse_i_block(nextInode.i_block, parIndex, mark);
+          }
+        }
+
+        len += dir->rec_len;        
+      }
+    } else {      
+      return;            
+    }
+  }
+  // printf("!!!!!!!!!!!!!!\n");
+  // printf("%d\n",i_block[11]);
+  // printf("%d\n",i_block[12]);
+  
+  // The 12th Block
+  // read_sectors(parArray[parIndex-1].start_sect + i_block[12]* BLOCK_SECTOR_RATIO, BLOCK_SECTOR_RATIO, buf_dir);
+
+  
+
+  // The 13th Block
+
+  // The 14th Block  
+
+}
+
+
 
 
 struct ext2_inode Get_Lost_Found_Inode(int parIndex) {
@@ -713,6 +895,121 @@ void pass3(int parIndex) {
 
 }
 
+void pass4(int parIndex) {
+
+  struct ext2_super_block super = get_superblock(parIndex);
+
+  int block_count = super.s_blocks_count;
+  int inode_count = super.s_inodes_count;
+  int inode_count_per_group = super.s_inodes_per_group;
+  int block_count_per_group = super.s_blocks_per_group;
+
+
+  int group_num = inode_count / inode_count_per_group;
+  int inode_table_occupied_blocks = (sizeof(struct ext2_inode) * inode_count_per_group + BLOCKSIZE - 1)/ BLOCKSIZE;
+
+  int* mark = (int*) malloc(sizeof(int) * block_count_per_group * group_num);
+  int* visited = (int*) malloc(sizeof(int) * inode_count);
+
+  memset(mark, 0, sizeof(int) * block_count_per_group * group_num);
+  memset(visited, 0, sizeof(int) * inode_count);
+
+  struct ext2_inode root_inode = Get_Root_Inode(parIndex);
+
+  visited[ROOT_INODE] = 1;
+
+  read_block_recursive(root_inode.i_block, parIndex, mark, visited);
+
+
+  // Set the block of metadata
+
+  // get all the group descriptors
+  int64_t blockgroup_offset;
+
+  if(BLOCKSIZE == 1024)
+    blockgroup_offset = SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE;
+  else // The first group descriptor locates in the next block following superblock    
+    blockgroup_offset = BLOCKSIZE;
+
+  unsigned char blockgroup_buf[BLOCKSIZE];
+  unsigned char block_bitmap[BLOCKSIZE];
+
+  // find the start sector for first block group descriptor
+  int blockgroup_start_sector = parArray[parIndex-1].start_sect + blockgroup_offset/SECTOR_SIZE_BYTES;
+                              
+  // Read one block to get all the block group descriptor                            
+  read_sectors(blockgroup_start_sector, BLOCK_SECTOR_RATIO, blockgroup_buf);  
+    
+  int count = 0;
+  for(; count < group_num; count++) {
+     // Find the corresponding group descriptor according to the block_group
+    struct ext2_group_desc* group_desc = (struct ext2_group_desc*)(blockgroup_buf + count * BLOCK_GROUP_DESC);  
+    
+    // set the block bitmap
+    mark[group_desc->bg_block_bitmap] = 1;
+
+    // set the inode bitmap
+    mark[group_desc->bg_inode_bitmap] = 1;
+
+
+    // set the inode table
+    int table_start = 0;
+    for(; table_start < inode_table_occupied_blocks; table_start++) {
+      mark[group_desc->bg_inode_table + table_start] = 1;
+
+    }
+
+    // set the super block and group descriptor
+    if(count == 0 || count == 1 || count == 9 || count == 25 || count == 49) {
+      // the group descriptor is the block ahead of block bitmap
+      mark[group_desc->bg_block_bitmap - 1] = 1;
+
+      // the super group is the block ahead of block bitmap
+      mark[group_desc->bg_block_bitmap - 2] = 1;
+
+    }
+
+    // Compare and Set the bitmap
+    int block_bitmap_start_block = parArray[parIndex-1].start_sect + group_desc->bg_block_bitmap * BLOCK_SECTOR_RATIO;
+
+    read_sectors(block_bitmap_start_block, BLOCK_SECTOR_RATIO, block_bitmap); 
+
+    // For each block in the current block group, compare with the bitmap, and do the fix if needed
+    int base = count * block_count_per_group;
+    int blk_idx = 0;
+    for(; blk_idx < block_count_per_group; blk_idx++) {
+      //set this bit
+      int tmp = blk_idx / 8;
+      int off = blk_idx % 8;
+      int mark_index;
+      if(BLOCKSIZE == 1024)
+        mark_index = base + blk_idx + 1;
+      else
+        mark_index = base + blk_idx ;
+      if(mark_index < block_count && (mark[mark_index] << off) != (block_bitmap[tmp] & (1 << off))) {
+        printf("the orginal:%d, index: %d, mark: %d \n",block_bitmap[tmp] & (1 << off), mark_index, mark[mark_index]);
+
+        if(mark_index < block_count) {
+          if(mark[mark_index])
+            block_bitmap[tmp] = block_bitmap[tmp] | (1 << off);
+          else
+            block_bitmap[tmp] = block_bitmap[tmp] & (!(1 << off));
+        }
+      }
+    
+        
+          // printf("the orginal:%d, index: %d, mark: %d \n",block_bitmap[tmp] & (1 << off), mark_index, mark[mark_index]);
+      // }
+      
+    } 
+    write_sectors(block_bitmap_start_block, BLOCK_SECTOR_RATIO, block_bitmap);     
+  }
+
+
+  free(mark);
+  free(visited);
+}
+
 
 void printf_inode(int inodeIndex, int parIndex) {
   struct ext2_inode node = Get_Inode(inodeIndex, parIndex);
@@ -764,43 +1061,40 @@ void main(int argc, char** argv) {
     }
 
 
-if(print_partition_num != 0){
-    if (print_partition_num > parArrayCounter || print_partition_num < 0)
-      printf("%d\n", -1);
-    else {
-      printf("0x%02X %d %d\n", parArray[print_partition_num-1].sys_ind, parArray[print_partition_num-1].start_sect,
-      parArray[print_partition_num-1].nr_sects);      
-    }
-} 
+  if(print_partition_num != 0){
+      if (print_partition_num > parArrayCounter || print_partition_num < 0)
+        printf("%d\n", -1);
+      else {
+        printf("0x%02X %d %d\n", parArray[print_partition_num-1].sys_ind, parArray[print_partition_num-1].start_sect,
+        parArray[print_partition_num-1].nr_sects);      
+      }
+  } 
 
-if(fix_partition_num != -1) {
-  if(fix_partition_num == 0) {
-    int idx = 1;
-    for(; idx <= parArrayCounter; idx++) {
-      if(parArray[idx-1].sys_ind == LINUX_EXT2_PARTITION) {
-        pass1(idx);
-        pass2(idx);
-        pass3(idx);
+  if(fix_partition_num != -1) {
+    if(fix_partition_num == 0) {
+      int idx = 1;
+      for(; idx <= parArrayCounter; idx++) {
+        if(parArray[idx-1].sys_ind == LINUX_EXT2_PARTITION) {
+          pass1(idx);
+          pass2(idx);
+          pass3(idx);
+          pass4(idx);
+        }
+      }
+    } else {
+      if(fix_partition_num <= parArrayCounter &&  fix_partition_num>0) {
+          pass1(fix_partition_num);
+          pass2(fix_partition_num);
+          pass3(fix_partition_num);
+          pass4(fix_partition_num);
       }
     }
-  } else {
-    if(fix_partition_num <= parArrayCounter &&  fix_partition_num>0) {
-        pass1(fix_partition_num);
-        pass2(fix_partition_num);
-        pass3(fix_partition_num);
-    }
   }
-}
-
-
-
-    
 
 
 
 
-
-    free(parArray);
+  free(parArray);
 
 
 
